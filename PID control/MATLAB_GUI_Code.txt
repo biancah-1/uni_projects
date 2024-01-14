@@ -1,0 +1,387 @@
+classdef dp_app_new < matlab.apps.AppBase
+
+    % Properties that correspond to app components
+    properties (Access = public)
+        UIFigure                matlab.ui.Figure
+        GridLayout              matlab.ui.container.GridLayout
+        LeftPanel               matlab.ui.container.Panel
+        StopButton              matlab.ui.control.Button
+        SetPointEditField       matlab.ui.control.NumericEditField
+        SetPointEditFieldLabel  matlab.ui.control.Label
+        kDEditField             matlab.ui.control.NumericEditField
+        kDEditFieldLabel        matlab.ui.control.Label
+        kPEditField             matlab.ui.control.NumericEditField
+        kPEditFieldLabel        matlab.ui.control.Label
+        kIEditField             matlab.ui.control.NumericEditField
+        kIEditFieldLabel        matlab.ui.control.Label
+        QuitButton              matlab.ui.control.Button
+        ResetButton             matlab.ui.control.Button
+        StartButton             matlab.ui.control.Button
+        RightPanel              matlab.ui.container.Panel
+        UIAxes                  matlab.ui.control.UIAxes
+    end
+
+    % Properties that correspond to apps with auto-reflow
+    properties (Access = private)
+        onePanelWidth = 576;
+    end
+
+    
+    properties (Access = private)
+        kP % proportional constant
+        kI % integral constant
+        kD % derivative constant
+        SP %set point
+        ser % serial port
+        PlotTimer 
+        dataADC % voltage being read by msp
+        yT %temperature
+        xt %time
+        PlotLine %for plotting temperature
+        spLine %for plotting set point
+ 
+    end
+    
+    methods (Access = private)
+        
+        function PlotTimerFcn(app,~,~)
+            flush(app.ser);
+            write(app.ser,1,"uint8");
+            app.dataADC = 3.1*(read(app.ser,400,"uint8")/255);
+            Vadc = mean(app.dataADC); %average of 400 points
+            
+            % resistance
+            R1 = 9970;
+            Vcc = 3.1; 
+            Rtherm=-Vadc*R1/(Vadc-Vcc);
+         
+            %temperature conversion
+            app.yT=-log(Rtherm/21222)/0.031;
+
+            % Update YData in plot to plot temperature
+            ydata = app.PlotLine.YData;
+            ydata = circshift(ydata,1);
+            ydata(1) = app.yT;
+
+            app.PlotLine.YData = ydata;
+            
+            
+        end 
+        
+        function sendVals(app)
+            %tell MSP that new values are coming in
+            write(app.ser,"n","char");
+            %converting set point temperature into a voltage
+            R1 = 9970;
+            Vcc = 3.1;
+            Rtherm = 21222*exp(-0.031*app.SP);
+            newSP = Rtherm*Vcc/(Rtherm+R1);
+
+            %send over constants to MSP
+            write(app.ser,app.kP*255/100,"uint8");
+            write(app.ser,app.kI*255/100,"uint8");
+            write(app.ser,app.kD*255/100,"uint8");
+            write(app.ser,newSP*255/3.3,"uint8");
+            
+        end
+        
+    end
+    
+
+    % Callbacks that handle component events
+    methods (Access = private)
+
+        % Code that executes after component creation
+        function startupFcn(app)
+
+            %make k's and sp editable 
+            app.kPEditField.Enable=1;
+            app.kIEditField.Enable=1;
+            app.kDEditField.Enable=1;
+            app.SetPointEditField.Enable=1;
+            
+            
+            % make buttons clickable
+            app.QuitButton.Enable=1;
+            app.ResetButton.Enable=1;
+            app.StartButton.Enable=1;
+            app.StopButton.Enable=1;
+            
+            %initialize serial port
+            app.ser=serialport("COM13",115200,"Timeout",50);
+            
+            % Configure x- and y- axis
+            app.UIAxes.XLim = [0 60];
+            app.UIAxes.XDir = 'reverse';
+            app.UIAxes.YLim = [0 50];
+            
+            % Initial plot is all zeros
+            app.PlotLine = plot(app.UIAxes,0:60,zeros(1,61));
+
+            % Create timer object
+            app.PlotTimer = timer(...
+                'ExecutionMode', 'fixedRate', ...    % runs timer repeatedly
+                'Period', 0.1, ...                  % period for plotting 0.1 s
+                'BusyMode', 'queue',...              % queue timer callbacks when busy
+                'TimerFcn', @app.PlotTimerFcn);      % specify callback function
+            
+
+             
+        end
+
+        % Changes arrangement of the app based on UIFigure width
+        function updateAppLayout(app, event)
+            currentFigureWidth = app.UIFigure.Position(3);
+            if(currentFigureWidth <= app.onePanelWidth)
+                % Change to a 2x1 grid
+                app.GridLayout.RowHeight = {480, 480};
+                app.GridLayout.ColumnWidth = {'1x'};
+                app.RightPanel.Layout.Row = 2;
+                app.RightPanel.Layout.Column = 1;
+            else
+                % Change to a 1x2 grid
+                app.GridLayout.RowHeight = {'1x'};
+                app.GridLayout.ColumnWidth = {220, '1x'};
+                app.RightPanel.Layout.Row = 1;
+                app.RightPanel.Layout.Column = 2;
+            end
+        end
+
+        % Button pushed function: ResetButton
+        function ResetButtonPushed(app, event)
+            stop(app.PlotTimer);
+            app.PlotLine = plot(app.UIAxes,0:60,zeros(1,61)); %reset plot
+            
+            %tell the MSP the reset button has been pushed and reset default
+            %values 
+            write(app.ser,"r","char");
+            
+            app.kP=1; 
+            app.kPEditField.Value=app.kP; 
+            
+            app.kI=1;
+            app.kIEditField.Value=app.kI;
+            
+            app.kD=1;
+            app.kDEditField.Value=app.kD;
+            
+            app.SP=20;
+            
+            app.SetPointEditField.Value=app.SP;
+            %send default values to MSP
+            sendVals(app);
+            
+            
+        end
+
+        % Value changed function: kPEditField
+        function kPEditFieldValueChanged(app, event)
+            app.kP = app.kPEditField.Value;
+            
+        end
+
+        % Value changed function: SetPointEditField
+        function SetPointEditFieldValueChanged(app, event)
+             app.SP = app.SetPointEditField.Value;
+
+        end
+
+        % Value changed function: kIEditField
+        function kIEditFieldValueChanged(app, event)
+            app.kI = app.kIEditField.Value;
+            
+        end
+
+        % Value changed function: kDEditField
+        function kDEditFieldValueChanged(app, event)
+            app.kD = app.kDEditField.Value;
+            
+        end
+
+        % Button pushed function: QuitButton
+        function QuitButtonPushed(app, event)
+            %tell MSP quit button was pushed
+            write(app.ser,"q","char");
+            stop(app.PlotTimer);
+            close(app.UIFigure);
+
+        end
+
+        % Button pushed function: StartButton
+        function StartButtonPushed(app, event)
+            sendVals(app);
+            %plot set point 
+            hold(app.UIAxes,'on');
+            app.spLine=plot(app.UIAxes,0:60,app.SP.*ones(1,61));
+            hold(app.UIAxes,'off');
+            % starts timer if it isn't already running
+            if strcmp(app.PlotTimer.Running, 'off')
+               start(app.PlotTimer);
+            end
+            
+        end
+
+        % Button pushed function: StopButton
+        function StopButtonPushed(app, event)
+            %tell MSP stop button was pushed
+            write(app.ser,"r","char");
+            delete(app.spLine);
+            stop(app.PlotTimer);
+            
+        end
+    end
+
+    % Component initialization
+    methods (Access = private)
+
+        % Create UIFigure and components
+        function createComponents(app)
+
+            % Create UIFigure and hide until all components are created
+            app.UIFigure = uifigure('Visible', 'off');
+            app.UIFigure.AutoResizeChildren = 'off';
+            app.UIFigure.Position = [100 100 640 480];
+            app.UIFigure.Name = 'MATLAB App';
+            app.UIFigure.SizeChangedFcn = createCallbackFcn(app, @updateAppLayout, true);
+
+            % Create GridLayout
+            app.GridLayout = uigridlayout(app.UIFigure);
+            app.GridLayout.ColumnWidth = {220, '1x'};
+            app.GridLayout.RowHeight = {'1x'};
+            app.GridLayout.ColumnSpacing = 0;
+            app.GridLayout.RowSpacing = 0;
+            app.GridLayout.Padding = [0 0 0 0];
+            app.GridLayout.Scrollable = 'on';
+
+            % Create LeftPanel
+            app.LeftPanel = uipanel(app.GridLayout);
+            app.LeftPanel.Layout.Row = 1;
+            app.LeftPanel.Layout.Column = 1;
+
+            % Create StartButton
+            app.StartButton = uibutton(app.LeftPanel, 'push');
+            app.StartButton.ButtonPushedFcn = createCallbackFcn(app, @StartButtonPushed, true);
+            app.StartButton.BackgroundColor = [0.7529 1 0.5412];
+            app.StartButton.Position = [60 171 100 22];
+            app.StartButton.Text = 'Start';
+
+            % Create ResetButton
+            app.ResetButton = uibutton(app.LeftPanel, 'push');
+            app.ResetButton.ButtonPushedFcn = createCallbackFcn(app, @ResetButtonPushed, true);
+            app.ResetButton.BackgroundColor = [1 0.9765 0.5098];
+            app.ResetButton.Position = [60 91 100 22];
+            app.ResetButton.Text = 'Reset';
+
+            % Create QuitButton
+            app.QuitButton = uibutton(app.LeftPanel, 'push');
+            app.QuitButton.ButtonPushedFcn = createCallbackFcn(app, @QuitButtonPushed, true);
+            app.QuitButton.BackgroundColor = [0.5608 0.8235 1];
+            app.QuitButton.Position = [60 49 100 22];
+            app.QuitButton.Text = 'Quit';
+
+            % Create kIEditFieldLabel
+            app.kIEditFieldLabel = uilabel(app.LeftPanel);
+            app.kIEditFieldLabel.HorizontalAlignment = 'center';
+            app.kIEditFieldLabel.Position = [40 282 25 22];
+            app.kIEditFieldLabel.Text = 'kI';
+
+            % Create kIEditField
+            app.kIEditField = uieditfield(app.LeftPanel, 'numeric');
+            app.kIEditField.Limits = [0 100];
+            app.kIEditField.ValueChangedFcn = createCallbackFcn(app, @kIEditFieldValueChanged, true);
+            app.kIEditField.HorizontalAlignment = 'center';
+            app.kIEditField.Position = [79 282 100 22];
+
+            % Create kPEditFieldLabel
+            app.kPEditFieldLabel = uilabel(app.LeftPanel);
+            app.kPEditFieldLabel.HorizontalAlignment = 'center';
+            app.kPEditFieldLabel.Position = [40 337 25 22];
+            app.kPEditFieldLabel.Text = 'kP';
+
+            % Create kPEditField
+            app.kPEditField = uieditfield(app.LeftPanel, 'numeric');
+            app.kPEditField.Limits = [0 100];
+            app.kPEditField.ValueChangedFcn = createCallbackFcn(app, @kPEditFieldValueChanged, true);
+            app.kPEditField.HorizontalAlignment = 'center';
+            app.kPEditField.Position = [79 337 100 22];
+
+            % Create kDEditFieldLabel
+            app.kDEditFieldLabel = uilabel(app.LeftPanel);
+            app.kDEditFieldLabel.HorizontalAlignment = 'center';
+            app.kDEditFieldLabel.Position = [40 229 25 22];
+            app.kDEditFieldLabel.Text = 'kD';
+
+            % Create kDEditField
+            app.kDEditField = uieditfield(app.LeftPanel, 'numeric');
+            app.kDEditField.Limits = [0 100];
+            app.kDEditField.ValueChangedFcn = createCallbackFcn(app, @kDEditFieldValueChanged, true);
+            app.kDEditField.HorizontalAlignment = 'center';
+            app.kDEditField.Position = [79 229 100 22];
+
+            % Create SetPointEditFieldLabel
+            app.SetPointEditFieldLabel = uilabel(app.LeftPanel);
+            app.SetPointEditFieldLabel.HorizontalAlignment = 'center';
+            app.SetPointEditFieldLabel.Position = [82 418 54 22];
+            app.SetPointEditFieldLabel.Text = 'Set Point';
+
+            % Create SetPointEditField
+            app.SetPointEditField = uieditfield(app.LeftPanel, 'numeric');
+            app.SetPointEditField.Limits = [5 45];
+            app.SetPointEditField.ValueChangedFcn = createCallbackFcn(app, @SetPointEditFieldValueChanged, true);
+            app.SetPointEditField.HorizontalAlignment = 'center';
+            app.SetPointEditField.Position = [40 383 139 22];
+            app.SetPointEditField.Value = 5;
+
+            % Create StopButton
+            app.StopButton = uibutton(app.LeftPanel, 'push');
+            app.StopButton.ButtonPushedFcn = createCallbackFcn(app, @StopButtonPushed, true);
+            app.StopButton.BackgroundColor = [1 0.5412 0.5412];
+            app.StopButton.Position = [59 131 100 22];
+            app.StopButton.Text = 'Stop';
+
+            % Create RightPanel
+            app.RightPanel = uipanel(app.GridLayout);
+            app.RightPanel.Layout.Row = 1;
+            app.RightPanel.Layout.Column = 2;
+
+            % Create UIAxes
+            app.UIAxes = uiaxes(app.RightPanel);
+            title(app.UIAxes, 'Thermistor Temperature')
+            xlabel(app.UIAxes, {'Time (s)'; ''})
+            ylabel(app.UIAxes, 'Temperature (°C)')
+            zlabel(app.UIAxes, 'Z')
+            app.UIAxes.Position = [11 16 395 449];
+
+            % Show the figure after all components are created
+            app.UIFigure.Visible = 'on';
+        end
+    end
+
+    % App creation and deletion
+    methods (Access = public)
+
+        % Construct app
+        function app = dp_app_new
+
+            % Create UIFigure and components
+            createComponents(app)
+
+            % Register the app with App Designer
+            registerApp(app, app.UIFigure)
+
+            % Execute the startup function
+            runStartupFcn(app, @startupFcn)
+
+            if nargout == 0
+                clear app
+            end
+        end
+
+        % Code that executes before app deletion
+        function delete(app)
+
+            % Delete UIFigure when app is deleted
+            delete(app.UIFigure)
+        end
+    end
+end

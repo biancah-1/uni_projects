@@ -1,0 +1,230 @@
+#include "io430.h"
+
+#define ON 1 
+#define OFF 0 
+#define GREEN_LED P1OUT_bit.P0 
+#define IN1 P2OUT_bit.P0
+#define IN2 P2OUT_bit.P3
+#define NPOINTS 400
+
+unsigned char v[NPOINTS];
+unsigned long receivedVals[4];
+signed long u_t=0,err, i_term=0, prev_err=0;
+
+//-------------------------------------------------------- 
+//UARTModule 
+//--------------------------------------------------------
+
+void Init_UART(void)
+{ 
+//initialize the USCI
+//RXD is on P1.1 
+//TXD is on P1.2
+
+//configure P1.1and P1.2 for secondary peripheral function
+P1SEL_bit.P1 = 1; 
+P1SEL2_bit.P1 = 1; 
+P1SEL_bit.P2 = 1; 
+P1SEL2_bit.P2 = 1;
+
+// divide by  139 for 115200b with 16MHz clock
+UCA0BR1 = 0; 
+UCA0BR0 = 139;
+
+//select UART clock source 
+UCA0CTL1_bit.UCSSEL1 = 1; 
+UCA0CTL1_bit.UCSSEL0 = 0;
+
+//release UART RESET 
+UCA0CTL1_bit.UCSWRST = 0;
+}
+
+
+unsigned char getc(void)
+{ 
+	while(!IFG2_bit.UCA0RXIFG); //wait until reset flag is set
+	return(UCA0RXBUF); 
+}
+
+void putc(unsigned char c) 
+{ 
+	while(!IFG2_bit.UCA0TXIFG); //wait until transmit flag is set
+	UCA0TXBUF = c; //assign char to transmit buffer
+} 
+
+
+//-------------------------------------------------------- 
+//ADCModule 
+//--------------------------------------------------------
+void Init_ADC(void)
+{
+  //initialize 10-bit ADC using input channel 4 on P1.4 
+  //Use Mode 2 - Repeat single channel
+  ADC10CTL1 = INCH_4 + CONSEQ_2; 
+  //use P1.4 (channel 4) 
+  ADC10AE0 |= BIT4; 
+  //enable analog input channel 4 
+  //select sample-hold time, multisample conversion and turn on the ADC
+  ADC10CTL0 |= ADC10SHT_0 + MSC + ADC10ON; 
+  //start ADC
+  ADC10CTL0 |= ADC10SC + ENC; 
+}
+
+void Sample(int n) 
+{
+    int i; 
+    for(i = 0; i < n; i++) 
+    v[i] = ADC10MEM >> 2; //bit shift since serial is in 8 bits, ADC is 10 bits
+}
+
+void Send(int n) 
+{
+    int i; 
+    for(i = 0; i < n; i++) 
+      putc(v[i]);
+}
+
+
+//-------------------------------------------------------- 
+//PID 
+//--------------------------------------------------------
+
+//read k constants and sp from matlab
+void constants()
+{
+  int i;
+  for(i=0; i<4; i++) //order: kP,kI,kD,sp
+    receivedVals[i] = getc();
+}
+
+//change duty cycle of pwm to change degree of heating/cooling
+void duty_cycle()
+{
+  if(u_t>255)//error large
+  {
+    TA0CCR1 = TA0CCR0; //set duty cycle to 100%
+  }
+  else
+  {
+    TA0CCR1=TA0CCR0*u_t/255; //duty cycle proportional to size of u(t)
+  }
+}
+
+
+//calculate u(t)
+void PID()
+{
+  unsigned long t_m; //measured temperature
+  signed long p_term=0, d_term=0, err; //current and previous errors, pid terms
+  unsigned long dt=1/115200;
+  t_m = ADC10MEM >> 2; //read voltage at thermistor stored in ADC
+  
+  //PID calc
+  err = receivedVals[3] - t_m; //set point - measured value
+
+  p_term = receivedVals[0]*err; 
+  i_term += receivedVals[1]*err*dt; 
+  d_term = receivedVals[2]*(err-prev_err)/dt;
+
+  prev_err = err;
+  u_t = p_term + i_term + d_term;
+  
+  
+  //change to heating/cooling and change degree of change based on u(t)
+  if(err<0) //negative = measured temp larger = too hot
+  {
+    //change to cooling
+    IN1 = 1; 
+    IN2 = 0; 
+    u_t=u_t*(-1);
+    duty_cycle();
+  }
+
+  else if(err>0) // positive = measured temp smaller = too cold
+  {
+    //change to heating
+    IN1 =0; 
+    IN2 =1; 
+    duty_cycle();
+  }
+  else
+  {
+  u_t=0;
+  duty_cycle();
+  }
+}
+
+void reset_vals(void)
+{
+  TA0CCR1 = 0; //sets duty cycle to 0
+  u_t=0;
+}
+
+void Init(void) 
+{ 
+  //Stop watchdog timer to prevent timeout reset 
+  WDTCTL = WDTPW + WDTHOLD;
+
+  DCOCTL = CALDCO_16MHZ; 
+  BCSCTL1 = CALBC1_16MHZ;
+  
+  //set bits
+  P1DIR = 0x41;
+  P1DIR = BIT0|BIT5|BIT7; //Set pins 1.0, 1.5, and 1.7 to the output direction.
+  P2DIR = BIT0|BIT3; // Set pins 2.0, and 2.3 to output
+  
+  //PWM
+  P1DIR |= BIT6;
+  P1SEL |= BIT6; //Select pin 1.6 as our PWM output.
+  TA0CCR0 = 2000; //Set the period in the Timer A0 Capture/Compare 0 
+  TA0CCTL1 = OUTMOD_7;
+  TA0CCR1 = 0; //high time
+  TA0CTL = TASSEL_2 + MC_1; //TASSEL_2 selects SMCLK as the clock source, and MC_1 tells it to count up to the value in TA0CCR0.
+  
+  P1OUT_bit.P5 = 1; //VCC
+  P1OUT_bit.P7 = 0; //VSS
+  
+  //control h-bridge current direction
+  IN1 = 0; 
+  IN2 = 1; 
+}
+
+
+void main(void) 
+{
+  Init();
+  Init_UART(); 
+  Init_ADC();
+  
+  GREEN_LED=OFF;
+  while(1){
+    
+    char test_c=getc();
+    if(test_c=='n') //change the k values when user hits start in matlab
+    {
+      constants();  
+    }
+    else if(test_c=='r') //reset system when reset or stop is pressed in MATLAB
+    {
+      reset_vals();
+    }
+    else if(test_c=='q') //stop if press quit button
+    {
+      reset_vals();
+      break;
+    }
+    else
+    {
+      // send ADC values to plot on matlab
+      GREEN_LED = ON; 
+      Send(NPOINTS); 
+      GREEN_LED = OFF; 
+      Sample(NPOINTS);
+      
+      //PID control
+      PID();
+    }
+
+  }
+}
+
